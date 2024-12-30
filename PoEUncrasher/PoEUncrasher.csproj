@@ -17,4 +17,11 @@
 	<ItemGroup>
 	  <LinkerArg Include="/merge:.managedcode=.text" />
 	</ItemGroup>
+
+	<ItemGroup>
+	  <None Remove="IntelCtdMode.bat" />
+	  <EmbeddedResource Include="IntelCtdMode.bat">
+	    <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+	  </EmbeddedResource>
+	</ItemGroup>
 </Project>

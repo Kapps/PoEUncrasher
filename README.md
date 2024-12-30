@@ -26,6 +26,12 @@ PoE by setting the process to realtime when it detects the game freezes. After t
 
 **If your issue is not Windows freezing on a loading screen, this tool will do nothing for you.**
 
+## Intel CPU 13th and 14th generation crash to desktop support
+
+Despite intel fixes for 13th and 14th gen cpus, PoE2 crashes to desktop for some people with a "Failed to decompress corrupted data". This happens during loading into a different zone, or while loading after starting the game.
+This fix prevents the crash by changing into powersave mode during loading into a different zone. When you run this application you need to run it with a "-ctd" parameter, or use the provided .bat file that does the same.
+The first time you run it you need to choose your powerplans to use as instructed.
+
 ## How to Use
 
 1. Grab the release from the [releases page](https://github.com/Kapps/PoEUncrasher/releases/)
