@@ -36,7 +36,7 @@ Regex endLoadMatcher = new(@"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} \d+ [a-fA-F0-9
 Regex guidMatcher = new("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
 
 bool isLoading = false;
-bool ctdMode = true;
+bool ctdMode = false;
 
 if (args.Length > 0)
 {
