@@ -4,9 +4,11 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using PoEUncrasher;
 
 ServiceProvider serviceProvider = new ServiceCollection()
     .AddLogging((loggingBuilder) => loggingBuilder
@@ -31,11 +33,111 @@ if (Int32.TryParse(Environment.GetEnvironmentVariable("CORES_TO_PARK"), out int 
 Regex startGameMatcher = new(@"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} \d+ [a-fA-F0-9]+ \[INFO Client \d+\] \[ENGINE\] Init$", RegexOptions.Compiled);
 Regex startLoadMatcher = new(@"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} \d+ [a-fA-F0-9]+ \[INFO Client \d+\] \[SHADER\] Delay: OFF$", RegexOptions.Compiled);
 Regex endLoadMatcher = new(@"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} \d+ [a-fA-F0-9]+ \[INFO Client \d+\] \[SHADER\] Delay: ON", RegexOptions.Compiled);
+Regex guidMatcher = new("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
 
 bool isLoading = false;
+bool ctdMode = false;
+
+if (args.Length > 0)
+{
+    if (args[0] == "-ctd") ctdMode = true;   
+}
+
+var powerPlanPath = "powerplan.json";
+PowerPlan? powerPlan = null;
+
 var fallbackGamePath = @"C:\Program Files (x86)\Grinding Gear Games\Path of Exile 2"; 
 var cancellationSource = new CancellationTokenSource();
 Console.CancelKeyPress += (_, _) => cancellationSource.Cancel();
+
+if (ctdMode)
+{
+    if (!File.Exists(powerPlanPath)) {
+        await ChoosePowerPlan();
+    }
+    else {
+        logger.LogInformation($"Delete {powerPlanPath} to reset your powerplan choices");
+        powerPlan = DeserializePlan();
+    }
+}
+
+PowerPlan? DeserializePlan()
+{
+    var fileText = File.ReadAllText(powerPlanPath);
+    return JsonSerializer.Deserialize<PowerPlan>(fileText);
+}
+
+async Task ChoosePowerPlan()
+{
+    var lines = await GetWindowsPowerPlans();
+
+    for (var i = 0; i < lines.Count; i++)
+    {
+        var line = lines[i];
+        Console.WriteLine(i+1 + " " + line[line.IndexOf('(')..]);
+    }
+            
+    Console.WriteLine("Please choose your energy saving power plan through the corresponging number:");
+    var input = Console.ReadLine();
+    var chosenplanPowersave = int.TryParse(input, out var chosenIndexSave) ? chosenIndexSave : -1;
+    
+    Console.WriteLine("Please choose your performance power plan through the corresponging number:");
+    input = Console.ReadLine();
+    var chosenplanPerformance = int.TryParse(input, out var chosenIndexPerf) ? chosenIndexPerf : -1;
+
+    if (chosenplanPowersave == -1 || chosenplanPerformance == -1 || chosenplanPowersave > lines.Count || chosenplanPerformance > lines.Count)
+    {
+        Console.WriteLine("Please choose valid numbers for both choices.");
+        await ChoosePowerPlan();
+        return;
+    }
+    
+    var powerSaveGuid = guidMatcher.Match(lines[chosenplanPowersave-1]).ToString();
+    var performanceGuid = guidMatcher.Match(lines[chosenplanPerformance-1]).ToString();
+    var plan = new PowerPlan{ PerformanceGuid = performanceGuid, PowerSaveGuid = powerSaveGuid};
+
+    powerPlan = plan;
+    await SavePowerPlanToFile(plan);
+}
+
+async Task SavePowerPlanToFile(PowerPlan plan)
+{
+    try
+    {
+        await File.WriteAllTextAsync(powerPlanPath, JsonSerializer.Serialize(plan));
+        powerPlan = plan;
+        Console.WriteLine("Successfully saved power plan choices");
+    }
+    catch (IOException)
+    {
+        logger.LogError("Could not write power plan to file, you will need to choose again next time."); 
+    }
+}
+
+async Task<List<string>> GetWindowsPowerPlans()
+{
+    var list = new List<string>();
+    var command = $"powercfg /list";
+    var processStartInfo = new ProcessStartInfo("cmd", "/c " + command) {
+        RedirectStandardOutput = true,
+        UseShellExecute = false,
+        CreateNoWindow = true
+    };
+    try {
+        using var process = new Process();
+        process.StartInfo = processStartInfo;
+        process.Start();
+        var result = await process.StandardOutput.ReadToEndAsync();
+        list = result.Split('\n').ToList();
+        list = list.Where(l => l.StartsWith("GUID")).ToList();
+        process.WaitForExit();
+    }
+    catch (Exception) {
+        logger.LogError("Could not read available power plans, running in admin mode?");
+    }
+
+    return list;
+}
 
 _ = Task.Run(async() => {
     while (!cancellationSource.IsCancellationRequested) {
@@ -102,7 +204,9 @@ if (proc == null) {
     // So if we started before the game starts, park first to prevent launch crashes.
     // We'll unpark when the user loads into a zone.
     proc = await WaitForExecutableToLaunch();
-    await ParkCores();
+    await SetLowLoadMode();
+
+   
 }
 
 string? gameDirectory = Path.GetDirectoryName(proc?.MainModule?.FileName);
@@ -129,6 +233,7 @@ using var reader = new StreamReader(logStream);
 logger.LogInformation("Reading client data from {clientTxtPath}", clientTxtPath);
 
 
+
 while (!cancellationSource.IsCancellationRequested) {
     var line = await reader.ReadLineAsync();
     if (String.IsNullOrWhiteSpace(line) || line.Length > 256) {
@@ -137,24 +242,37 @@ while (!cancellationSource.IsCancellationRequested) {
     }
 
     if (startLoadMatcher.IsMatch(line) || startGameMatcher.IsMatch(line)) {
-        await ParkCores();
+       await SetLowLoadMode();
     } else if (endLoadMatcher.IsMatch(line)) {
-        await ResumeCores();
+        await SetHighLoadMode();
     }
 }
 
 
 async Task<Process?> WaitForExecutableToLaunch() {
     while (!cancellationSource.IsCancellationRequested) {
-        var proc = await GetPathOfExileProcess();
-        if (proc is { HasExited: false }) {
-            return proc;
+        var poeProc = await GetPathOfExileProcess();
+        if (poeProc is { HasExited: false }) {
+            return poeProc;
         }
         
         await Task.Delay(200);
     }
 
     return null;
+}
+
+async Task SetLowLoadMode()
+{
+    if (ctdMode) await SetPowersavePlan();
+    else await ParkCores();
+}
+
+
+async Task SetHighLoadMode()
+{
+    if (ctdMode) await SetPerformancePlan();
+    else await ResumeCores();
 }
 
 async Task ParkCores() {
@@ -165,13 +283,57 @@ async Task ParkCores() {
 
     IntPtr affinity = new IntPtr(Convert.ToInt64(affinityBits.ToString(), 2));
     
-    var proc = await GetPathOfExileProcess();
-    if (proc is { HasExited: false }) {
-        proc.ProcessorAffinity = affinity;
+    var poeProc = await GetPathOfExileProcess();
+    if (poeProc is { HasExited: false }) {
+        poeProc.ProcessorAffinity = affinity;
         logger.LogInformation("Parked cores: {affinityBits}", affinityBits);
         Interlocked.Exchange(ref isLoading, true);
     } else {
         logger.LogError("Detected loading screen, but could not find any process to park.");
+    }
+}
+
+async Task SetPowersavePlan()
+{
+    var poeProc = await GetPathOfExileProcess();
+     if (poeProc is { HasExited: false }) {
+         logger.LogInformation("Setting powersave powerplan");
+         await ChangePowerplan(powerPlan!.Value.PowerSaveGuid);
+         Interlocked.Exchange(ref isLoading, true);
+     } else {
+        logger.LogError("Could not change powerplan, poe process was not found.");
+     }
+}
+
+async Task SetPerformancePlan() {
+    using var poeProc = await GetPathOfExileProcess();
+    if (poeProc is { HasExited: false }) {
+        logger.LogInformation("Setting performance powerplan");
+        await ChangePowerplan(powerPlan!.Value.PerformanceGuid);
+        Interlocked.Exchange(ref isLoading, false);
+    } else {
+        logger.LogError("Could not change powerplan, poe process was not found.");
+    }
+}
+
+async Task ChangePowerplan(string planGuid)
+{
+    var command = $"powercfg /setactive {planGuid}";
+    var processStartInfo = new ProcessStartInfo("cmd", "/c " + command) {
+        RedirectStandardOutput = true,
+        UseShellExecute = false,
+        CreateNoWindow = true
+    };
+    try {
+        using var process = new Process();
+        process.StartInfo = processStartInfo;
+        process.Start();
+        var result = await process.StandardOutput.ReadToEndAsync();
+        process.WaitForExit();
+        Console.WriteLine(result);
+    }
+    catch (Exception) {
+         logger.LogError("Could not change powerplan, poe process was not found.");
     }
 }
 
@@ -180,9 +342,9 @@ async Task ResumeCores() {
 
     IntPtr affinity = new IntPtr(Convert.ToInt64(affinityBits.ToString(), 2));
     
-    var proc = await GetPathOfExileProcess();
-    if (proc is { HasExited: false }) {
-        proc.ProcessorAffinity = affinity;
+    var poeProc = await GetPathOfExileProcess();
+    if (poeProc is { HasExited: false }) {
+        poeProc.ProcessorAffinity = affinity;
         logger.LogInformation("Unparked cores: {affinityBits}", affinityBits);
         Interlocked.Exchange(ref isLoading, false);
     } else {
